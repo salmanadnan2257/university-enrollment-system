@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>AttendanceForm</class>
+ <widget class="QMainWindow" name="AttendanceForm">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>600</width>
+    <height>400</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Attendance</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QVBoxLayout" name="verticalLayout">
+    <!-- A label for the title -->
+    <item>
+     <widget class="QLabel" name="title_label">
+      <property name="text">
+       <string>Attendance Page</string>
+      </property>
+      <property name="alignment">
+       <set>Qt::AlignCenter</set>
+      </property>
+     </widget>
+    </item>
+
+    <!-- The table where attendance data is displayed -->
+    <item>
+     <widget class="QTableWidget" name="attendance_table"/>
+    </item>
+
+    <!-- Button to finalize or mark attendance changes -->
+    <item>
+     <widget class="QPushButton" name="mark_button">
+      <property name="text">
+       <string>Mark Attendance</string>
+      </property>
+     </widget>
+    </item>
+
+   </layout>
+  </widget>
+  <resources/>
+  <connections/>
+ </widget>
+</ui>
