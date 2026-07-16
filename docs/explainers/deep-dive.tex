@@ -1,0 +1,1896 @@
+% explainer-source-hash: bce9ca386d29403f9f7ef5635ce05a37dbb97c767bc5d139b36782533ef55271
+% explainer-source-commit: ec75488bce3db41a4f254c8c70bbc4f8f1693cf8
+% explainer-generated: 2026-07-16
+% Regenerate with /explain-all (see WIRING.md). Do not edit this stamp by hand:
+% it is how the toolchain knows whether this document still matches the code.
+\documentclass[11pt,a4paper]{article}
+\input{preamble}
+
+\title{\vspace{-1.5cm}\textbf{University Enrollment System}\\[0.3em]
+\large A Deep Dive into a PyQt6 + SQLAlchemy Course Registration Desktop App}
+\author{Explainer document for Salman Adnan}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\begin{keyidea}{Read this first: what this document is}
+This is an exhaustive, beginner-safe walkthrough of the \file{university-enrollment-system}
+project. It assumes no prior knowledge: every technical term is defined at first use.
+
+It is a working document for your own understanding and interview defence, not marketing
+copy. Where the code is weak, wrong, or disagrees with the README, this document says so
+plainly, in a red box. A flaw you learn about here is a flaw you can defend in a room. A
+flaw an interviewer finds first is not.
+
+Two sections carry the weight of the project and are treated in full depth: the
+\textbf{data model} (Section~\ref{sec:datamodel}) and the \textbf{enrollment rules}
+(Section~\ref{sec:rules}).
+\end{keyidea}
+
+\tableofcontents
+\newpage
+
+% =====================================================================
+\section{What this project is}
+
+\subsection{The one-sentence version}
+
+A desktop application that lets a university student log in, receive a code by email,
+confirm it, and then build a course timetable: browse a catalogue of course sections,
+put some in a cart, enroll, drop, swap sections, look at the resulting weekly schedule,
+export it to a spreadsheet, mark attendance, and read a log of everything they did.
+
+\subsection{Provenance and scope}
+
+Per the project README, this was the semester project for the Databases course
+(CS/CE 355/373) at Habib University, built by a two-person team, Salman Adnan and Shayan
+Wasif, in the 4th semester. The README records Salman's areas as the email verification
+(login MFA) flow, the attendance module with its email confirmations, the Docker
+packaging, and integration plus bug fixing across the screens.
+
+\begin{jargon}{README}
+A \file{README} is the plain-text introduction file that sits at the root of a code
+repository. By convention it is the first thing a reader opens. It is written by humans
+and is not executed, so it can drift out of step with the code. Throughout this document,
+where the README and the code disagree, \textbf{the code wins}, and the disagreement is
+recorded as a finding.
+\end{jargon}
+
+By size this is a mid-weight project: 13 Python modules totalling roughly 2,570 lines,
+11 interface-definition files, and one pre-seeded database file. That is small enough to
+cover completely, which this document does, and large enough that the structure matters.
+
+\subsection{How the facts in this document were established}
+
+This matters, because it tells you which claims you can defend hard and which you cannot.
+
+\begin{itemize}
+  \item \textbf{Read.} Every tracked file was read end to end.
+  \item \textbf{Queried.} The shipped \file{student.db} was opened read-only and its
+        schema, row counts, and actual data were inspected directly. Every number quoted
+        about the database in this document came out of the file, not out of the README.
+  \item \textbf{Executed.} The data-access layer (\file{queries.py}) was imported into a
+        throwaway virtual environment and run against a \emph{copy} of the database, to
+        test the capacity arithmetic and the swap operation. The results are reported in
+        Sections~\ref{sec:capacity} and~\ref{sec:swap}. The original database was not
+        touched.
+  \item \textbf{Executed.} PyQt6 was installed in that same throwaway environment purely
+        to settle one question of fact about enum truthiness, in
+        Section~\ref{sec:checkstate}.
+  \item \textbf{Not executed.} The graphical application itself was never launched: PyQt6
+        is not installed on the machine this document was written on, and the app needs a
+        desktop. Any claim about on-screen behaviour is therefore a reading of the code,
+        and is labelled as such.
+  \item \textbf{Not executed.} The Docker image was never built: the Docker daemon was not
+        running. Section~\ref{sec:docker} contains one clearly labelled inference as a
+        result.
+\end{itemize}
+
+% =====================================================================
+\section{Orientation: the shape of the whole thing}
+
+Before any detail, here is the entire application in one picture. Every box is a window
+the user can be looking at; every arrow is a transition the code actually wires up.
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tikzpicture}[node distance=8mm]
+
+  \node[box] (login) {\textbf{login\_page.py}\\\scriptsize LoginForm\\\scriptsize email + password};
+  \node[box, right=16mm of login] (verif) {\textbf{verification.py}\\\scriptsize VerificationForm\\\scriptsize 6-digit code};
+  \node[box, right=16mm of verif, fill=accent!20] (main) {\textbf{main\_window.py}\\\scriptsize MainStudentWindow\\\scriptsize the hub};
+
+  \node[box, above right=6mm and 22mm of main] (add) {\textbf{add\_courses.py}\\\scriptsize AddCoursesWindow\\\scriptsize the cart};
+  \node[box, below=5mm of add] (enroll) {\textbf{enroll.py}\\\scriptsize ViewScheduleWindow\\\scriptsize checkout};
+  \node[box, below=5mm of enroll] (drop) {\textbf{drop\_courses.py}\\\scriptsize DropCoursesWindow};
+  \node[box, below=5mm of drop] (swap) {\textbf{swap\_courses.py}\\\scriptsize SwapCoursesWindow};
+  \node[box, below=5mm of swap] (view) {\textbf{view\_schedule.py}\\\scriptsize ViewScheduleWindow};
+  \node[box, below=5mm of view] (att) {\textbf{attendance.py}\\\scriptsize AttendanceForm};
+  \node[box, below=5mm of att] (log) {\textbf{activity\_log.py}\\\scriptsize ActivityLogWindow};
+
+  \node[store, below=20mm of verif] (q) {\textbf{queries.py}\\\scriptsize AllQueries\\\scriptsize the only way to the data};
+  \node[store, below=8mm of q] (db) {\textbf{student.db}\\\scriptsize SQLite};
+  \node[extbox, below=20mm of login] (smtp) {\scriptsize Gmail SMTP\\\scriptsize (optional)};
+
+  \draw[flow] (login) -- node[lbl,above]{password\\matches} (verif);
+  \draw[flow] (verif) -- node[lbl,above]{code\\matches} (main);
+  \draw[dflow] (verif) -- node[lbl,left,pos=0.4]{send code} (smtp);
+  \draw[dflow] (att.east) to[out=0,in=0,looseness=1.4] node[lbl,pos=0.5]{confirmations} ($(smtp.east)+(0,0)$);
+
+  \foreach \t in {add,enroll,drop,swap,view,att,log}
+    \draw[flow] (main.east) -- (\t.west);
+
+  \draw[flow] (add.south east) to[out=-30,in=30,looseness=1.6] node[lbl]{Next} (enroll.north east);
+
+  \foreach \t in {add,enroll,drop,swap,view,att,log,main,login,verif}
+    \draw[dflow, opacity=0.35] (\t) -- (q);
+
+  \draw[flow] (q) -- node[lbl,right]{SQLAlchemy ORM} (db);
+
+\end{tikzpicture}}
+\caption{The whole application. Solid arrows are window transitions; faint dashed arrows
+are data-access calls. Every screen without exception reaches the database through
+\code{AllQueries}. That single choke point is the best structural decision in the project.}
+\label{fig:arch}
+\end{figure}
+
+\begin{jargon}{Desktop app, GUI, and PyQt6}
+A \textbf{GUI} (Graphical User Interface) is software you click on, as opposed to one you
+type commands at. \textbf{Qt} is a long-established C++ toolkit for building GUIs: it
+supplies the buttons, tables, and windows. \textbf{PyQt6} is a Python binding for Qt
+version 6, meaning a translation layer that lets Python code drive Qt's C++ machinery.
+This project is a \textbf{desktop app}: it runs as a program on your own computer and
+draws its own windows, unlike a web app, which runs in a browser.
+\end{jargon}
+
+\begin{jargon}{SQLite}
+\textbf{SQLite} is a database that lives in a single ordinary file on disk, with no server
+process to install or start. Here that file is \file{student.db}. This makes it ideal for
+coursework and for shipping a demo, since a clone of the repository comes with its data
+already in it, and less appropriate for anything with many simultaneous users.
+\end{jargon}
+
+\begin{jargon}{ORM and SQLAlchemy}
+A database stores rows in tables. Python works in objects. An \textbf{ORM}
+(Object-Relational Mapper) is the layer that translates between the two, so that a row in
+the \code{student} table appears in Python as a \code{Student} object with a \code{.name}
+attribute. \textbf{SQLAlchemy} is the standard Python ORM. It means you rarely write SQL
+by hand; you write \code{session.query(Student).filter\_by(std\_id=123).first()} and
+SQLAlchemy emits the \code{SELECT} for you.
+\end{jargon}
+
+\subsection{The file layout}
+
+\begin{figure}[H]
+\centering
+\begin{forest} dirtree
+[university-enrollment-system/
+  [login\_page.py \quad{\rmfamily\itshape entry point}]
+  [verification.py \quad{\rmfamily\itshape MFA code screen}]
+  [main\_window.py \quad{\rmfamily\itshape hub}]
+  [add\_courses.py \quad{\rmfamily\itshape the cart}]
+  [enroll.py \quad{\rmfamily\itshape checkout}]
+  [drop\_courses.py]
+  [swap\_courses.py]
+  [view\_schedule.py \quad{\rmfamily\itshape + Excel export}]
+  [attendance.py]
+  [activity\_log.py]
+  [queries.py \quad{\rmfamily\itshape data-access layer}]
+  [student\_database.py \quad{\rmfamily\itshape ORM models + engine}]
+  [courses\_database.py \quad{\rmfamily\itshape DEAD, never imported}]
+  [*.ui \quad{\rmfamily\itshape 11 Qt Designer layouts}]
+  [student.db \quad{\rmfamily\itshape pre-seeded SQLite file}]
+  [requirements.txt]
+  [Dockerfile]
+  [{run-linux.sh, run-macos.sh, run-windows.ps1}]
+  [.env.example]
+  [Proposal.pdf]
+  [docs/
+    [screenshots/app.png]
+    [explainers/ \quad{\rmfamily\itshape this document}]
+  ]
+]
+\end{forest}
+\caption{Every tracked file. The project is flat: no packages, no \file{src/} directory,
+one module per screen.}
+\end{figure}
+
+\begin{honest}{The flat layout is a real constraint, not just a style choice}
+Every screen calls \code{uic.loadUi('name.ui', self)} with a \emph{relative} path. A
+relative path is resolved against the process's current working directory, not against the
+location of the Python file. The practical consequence: the application only runs if you
+launch it from inside the project directory. Run \code{python /some/where/login\_page.py}
+from your home directory and it crashes on the first \code{loadUi}. The README states this
+plainly and it is why the Dockerfile sets \code{WORKDIR /app}. It is worth being able to
+say out loud: this is a bug that packaging has to work around rather than a decision.
+\end{honest}
+
+\begin{jargon}{Qt Designer and \file{.ui} files}
+Rather than writing code to place every button, you can draw the window in a visual editor
+called \textbf{Qt Designer}, which saves the layout as a \file{.ui} file (an XML document
+listing widgets, their names, and their positions). \code{uic.loadUi} reads that file
+\emph{at runtime} and builds the widgets, attaching each one to the window object under
+its Designer name. That is why \code{self.login\_button} exists in
+\file{login\_page.py} even though no line of Python ever created it.
+\end{jargon}
+
+% =====================================================================
+\section{The data model}
+\label{sec:datamodel}
+
+This is a Databases course project, so the schema is the centre of gravity. Everything in
+this section was read out of \file{student\_database.py} and then verified against the
+actual \file{student.db} file.
+
+\begin{jargon}{Schema, table, row, column}
+A \textbf{table} is a grid of data, like a spreadsheet tab. A \textbf{column} is one named
+field with a type (a whole number, a string of text, a time). A \textbf{row} is one record.
+The \textbf{schema} is the full description of which tables exist and what columns they
+have. In SQLAlchemy the schema is written as Python classes, and
+\code{Base.metadata.create\_all(engine)} turns those classes into real tables.
+\end{jargon}
+
+\begin{jargon}{Primary key and foreign key}
+A \textbf{primary key} (PK) is the column, or the combination of columns, that uniquely
+identifies a row. No two rows may share it. When a PK is made of more than one column it
+is called a \textbf{composite} primary key. A \textbf{foreign key} (FK) is a column that
+points at another table's primary key, expressing a relationship: ``this enrollment row
+belongs to that student''. A database can \emph{enforce} foreign keys, refusing to store a
+row that points at a student who does not exist. Whether this one does is the subject of
+Section~\ref{sec:fkbroken}, and the answer will surprise you.
+\end{jargon}
+
+\subsection{The five tables, drawn}
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tikzpicture}[
+  tbl/.style={rectangle, draw=inkblue, fill=white, rounded corners=2pt,
+              align=left, inner sep=0pt, font=\scriptsize\ttfamily},
+  hdr/.style={font=\scriptsize\bfseries\rmfamily, text=white, fill=inkblue,
+              align=center, inner sep=3pt, minimum width=42mm},
+  dead/.style={hdr, fill=warnred},
+  body/.style={align=left, inner sep=4pt, font=\scriptsize\ttfamily, text width=42mm}
+]
+
+% ---- STUDENT
+\node[hdr] (sh) {student};
+\node[tbl, below=0pt of sh, anchor=north] (sb)
+ {\begin{tabular}{@{}p{40mm}@{}}
+   \textbf{std\_id} \hfill INTEGER \textit{PK}\\
+   name \hfill VARCHAR\\
+   email \hfill VARCHAR\\
+   password \hfill VARCHAR \textcolor{warnred}{plaintext}\\
+   dob \hfill DATE\\
+   major \hfill VARCHAR\\[2pt]
+   \rmfamily\itshape\scriptsize 6 rows in student.db
+ \end{tabular}};
+
+% ---- COURSE_LIST
+\node[hdr, right=52mm of sh] (ch) {course\_list \rmfamily\normalfont{\itshape(a section)}};
+\node[tbl, below=0pt of ch, anchor=north] (cb)
+ {\begin{tabular}{@{}p{40mm}@{}}
+   \textbf{course\_list\_id} \hfill INTEGER \textit{PK}\\
+   \textbf{section} \hfill VARCHAR \textit{PK}\\
+   course\_name \hfill VARCHAR\\
+   start\_time \hfill TIME\\
+   end\_time \hfill TIME\\
+   days \hfill VARCHAR \textcolor{accent}{"MoWe"}\\
+   room \hfill VARCHAR\\
+   instructor \hfill VARCHAR\\
+   status \hfill BOOLEAN\\
+   max\_capacity \hfill \textcolor{warnred}{never read}\\
+   current\_capacity \hfill INTEGER\\[2pt]
+   \rmfamily\itshape\scriptsize 17 rows in student.db
+ \end{tabular}};
+
+% ---- COURSE (junction)
+\node[hdr, below=26mm of sb.south, anchor=north, fill=accent] (jh) {course \rmfamily\normalfont{\itshape(an enrollment)}};
+\node[tbl, below=0pt of jh, anchor=north, draw=accent] (jb)
+ {\begin{tabular}{@{}p{40mm}@{}}
+   \textbf{course\_id} \hfill INTEGER \textit{PK,FK}\\
+   \textbf{std\_id} \hfill INTEGER \textit{PK,FK}\\
+   \textbf{section} \hfill VARCHAR \textit{PK}\\
+   is\_temp \hfill BOOLEAN \textcolor{accent}{cart flag}\\
+   type \hfill VARCHAR \textcolor{accent}{"Add"/NULL}\\
+   swap\_id \hfill \textcolor{warnred}{dead, all NULL}\\
+   remove\_id \hfill \textcolor{warnred}{dead, all NULL}\\[2pt]
+   \rmfamily\itshape\scriptsize 10 rows in student.db
+ \end{tabular}};
+
+% ---- ACTIVITY
+\node[hdr, right=52mm of jh] (ah) {activity};
+\node[tbl, below=0pt of ah, anchor=north] (ab)
+ {\begin{tabular}{@{}p{40mm}@{}}
+   \textbf{activity\_id} \hfill INTEGER \textit{PK}\\
+   std\_id \hfill INTEGER \textit{FK}\\
+   course\_id \hfill \textcolor{warnred}{VARCHAR} \textit{FK}\\
+   activity\_type \hfill VARCHAR\\
+   activity\_date \hfill DATE\\
+   activity\_time \hfill TIME\\
+   course\_section \hfill VARCHAR\\[2pt]
+   \rmfamily\itshape\scriptsize 116 rows in student.db
+ \end{tabular}};
+
+% ---- FILTER (dead)
+\node[dead, below=14mm of jb.south, anchor=north] (fh) {filter \rmfamily\normalfont{\itshape(DEAD)}};
+\node[tbl, below=0pt of fh, anchor=north, draw=warnred] (fb)
+ {\begin{tabular}{@{}p{40mm}@{}}
+   \textbf{filter\_id} \hfill INTEGER \textit{PK}\\
+   std\_id \hfill INTEGER \textit{FK}\\
+   by\_day \hfill BOOLEAN\\
+   by\_week \hfill BOOLEAN\\[2pt]
+   \rmfamily\itshape\scriptsize 0 rows; no code reads
+   \rmfamily\itshape\scriptsize or writes this table
+ \end{tabular}};
+
+% ---- edges
+\draw[flow] (jb.west) to[out=180,in=180,looseness=0.9]
+  node[lbl,pos=0.5]{many\\enrollments\\per student} (sb.west);
+\draw[flow] (jb.east) -- node[lbl,pos=0.5,above]{many enrollments\\per section} (cb.south west);
+\draw[flow] (ab.north) -- node[lbl,pos=0.5,right]{logged for} (cb.south);
+\draw[flow] (ab.west) -- node[lbl,pos=0.5,above]{done by} (jb.east);
+\draw[dflow, draw=warnred] (fb.west) to[out=180,in=180,looseness=1.7] (sb.west);
+
+\end{tikzpicture}}
+\caption{The full schema as it exists in \file{student.db}, with row counts taken from the
+shipped file. Blue is the junction table that carries the whole enrollment idea. Red marks
+what is declared but dead.}
+\label{fig:er}
+\end{figure}
+
+\subsection{Table by table}
+
+\subsubsection{\code{student}}
+
+Six columns, one per student, keyed by \code{std\_id}. The shipped database holds 6 rows:
+Alice (20180), Bob (123), Steve (153), Babar (173), Umer (257), Ronaldo (273).
+
+\begin{honest}{Passwords are stored in plaintext, and the README says so}
+\code{Student.password} is a plain \code{String}. \file{login\_page.py} fetches it with
+\code{get\_password\_by\_email(email)} and compares with \code{password == user\_password},
+a direct string comparison. There is no hashing, no salt, nothing.
+
+This is genuinely bad, and the right way to talk about it is exactly how the README already
+does: it is a coursework limitation, it is called out in the Usage section, and hashing
+with bcrypt is listed as a follow-up. Do not defend it as a design choice. Say: ``it is
+plaintext, I know why that is wrong, I documented it rather than hiding it, and the fix is
+bcrypt at the two call sites.''
+\end{honest}
+
+\subsubsection{\code{course\_list}: the catalogue}
+
+This is the table of \emph{sections}, not of courses. The distinction is the single most
+important thing to understand about this schema.
+
+\begin{keyidea}{A section, not a course, is the unit of everything}
+\code{course\_list} has a \textbf{composite primary key}:
+\code{(course\_list\_id, section)}. So ``Data Structure II'' is not one row. It is three:
+
+\begin{center}\ttfamily\small
+\begin{tabular}{@{}llllll@{}}
+\toprule
+id & section & name & days & start & end \\
+\midrule
+201 & L1 & Data Structure II & MoWe & 11:30 & 12:45 \\
+201 & L2 & Data Structure II & WeFr & 14:30 & 15:45 \\
+201 & L3 & Data Structure II & MoWe & 16:00 & 17:15 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The course \emph{name}, and every timing detail, is repeated on each section row. A student
+enrolls in a section. A clash is between sections. A swap, as
+Section~\ref{sec:swap} shows, is defined as moving between two sections of the
+\emph{same} \code{course\_list\_id}. Once you see that ``a row is a section'', the rest of
+the schema reads cleanly.
+\end{keyidea}
+
+\begin{honest}{The catalogue is not normalised, and this is a Databases project}
+Because the course name lives on every section row, ``Data Structure II'' is stored three
+times. Rename the course and you must update three rows or the catalogue disagrees with
+itself. The textbook fix is two tables: a \code{course} table
+(\code{course\_id}, \code{course\_name}) and a \code{section} table referencing it with
+the timing, room, instructor, and capacity.
+
+This is worth rehearsing precisely because of the course it was submitted to. An examiner
+looking for normalisation will find this immediately. The honest answer is that the
+denormalisation is real, it buys nothing here except simpler queries, and the two-table
+split is what you would do now.
+\end{honest}
+
+The \code{days} column deserves a note: it is a string of two-character day codes glued
+together, so \code{"MoWe"} means Monday and Wednesday. The whole catalogue uses only four
+patterns, verified against the file: \code{MoWe}, \code{WeFr}, \code{TuTh}, and one
+\code{MoSa}. Section~\ref{sec:clash} shows how the clash checker takes this string apart.
+
+\begin{honest}{Junk in the seeded catalogue}
+Row \code{(520, 'S1')} is called ``Test Course'', runs \code{02:30} to \code{02:45} on
+\code{MoSa}, and is plainly leftover test data that shipped. It is 15 minutes long, at half
+past two in the morning, on Monday and Saturday. If you demo the app live, this row will
+appear in the catalogue. Either delete it from the seed or be ready to explain it.
+\end{honest}
+
+\subsubsection{\code{course}: the junction table, and the cart}
+
+\begin{jargon}{Junction table (also: join table, associative entity)}
+A student takes many sections; a section holds many students. That is a
+\textbf{many-to-many} relationship, and a relational database cannot express it with a
+single foreign key on either side. The standard solution is a third table whose rows each
+pair one student with one section. That is a \textbf{junction table}. Here it is
+\code{course}, and its primary key \code{(course\_id, std\_id, section)} is exactly the
+statement ``this student holds this section of this course, at most once''.
+\end{jargon}
+
+The clever part is that this table does double duty. It holds both what you are
+\emph{enrolled in} and what is sitting in your \emph{cart}, distinguished by two columns:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{\code{is\_temp}} & \textbf{\code{type}} & \textbf{meaning} \\
+\midrule
+\code{True} & \code{"Add"} & in the cart, not yet enrolled \\
+\code{False} & \code{NULL} & really enrolled \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Verified against the shipped database: every one of the 10 \code{course} rows has
+\code{is\_temp = 0} and \code{type = NULL}. That is, the shipped state has nobody with
+anything in their cart, which is what you would expect from a clean save.
+
+\begin{honest}{\code{swap\_id} and \code{remove\_id} are dead columns}
+Both are declared on the \code{Course} model, both have foreign keys, and the source even
+carries a commented-out earlier version of their definitions. No code anywhere assigns
+either one. Verified: all 10 rows have both \code{NULL}. They are the fossil of a design
+where a swap was going to be recorded as a link between two \code{course} rows rather than
+as a delete plus an insert. Section~\ref{sec:swap} shows what was built instead, and why
+that fossil is a bit of a shame.
+\end{honest}
+
+\subsubsection{\code{activity}: the log}
+
+Every action appends a row here. The shipped database has 116 of them. The distinct
+\code{activity\_type} values, read out of the file, are exactly:
+\code{Add}, \code{Enroll}, \code{Drop}, \code{Swap},
+\code{Filter by Day}, \code{Filter by Week}, \code{Export Schedule}, \code{Attendance}.
+
+\begin{honest}{\code{activity.course\_id} is a \code{VARCHAR} that stores prose}
+The column is declared \code{Column(String, ForeignKey('course\_list.course\_list\_id'))}.
+It is a \emph{text} column claiming to be a foreign key to an \emph{integer} primary key.
+It is not used as an identifier at all. These are real, distinct values read out of the
+shipped table:
+
+\begin{center}\ttfamily\small
+'201' \quad '201, 202' \quad '201, 202, 205, 310, 330' \quad '201 -> 201' \quad 'None' \quad NULL
+\end{center}
+
+So the column variously holds one id, a comma-joined list of ids from a multi-course
+enroll, an arrow expression from a swap, the four-character string \code{'None'}, and a
+genuine SQL \code{NULL}. \code{course\_section} is the same story: it holds \code{'L1'},
+\code{'L1, S1'}, \code{'L3 -> L2'}, and for attendance rows an entire sentence.
+
+The log is therefore a \textbf{denormalised, human-readable audit trail}, not a queryable
+relation. You cannot ask ``how many times was course 201 dropped'' without parsing strings.
+The honest framing: it was built to be rendered into a table widget, and it does that job,
+but calling it a foreign key in the model is a false claim the schema makes about itself.
+
+Note the \code{'None'} strings specifically: current code writes
+\code{str(course\_id) if course\_id else None}, which yields a real \code{NULL} for a
+missing id. So those \code{'None'} rows were written by an \emph{earlier} version of the
+code that called \code{str()} unconditionally. The shipped database is a historical
+artifact spanning more than one generation of this function. That is a fine thing to
+notice out loud; it shows you read the data and not just the code.
+\end{honest}
+
+\subsubsection{\code{filter}: declared, created, never used}
+
+\begin{honest}{The \code{filter} table is entirely dead}
+\code{Filter} is a full SQLAlchemy model with \code{by\_day} and \code{by\_week} booleans
+and a relationship back to \code{Student}. \code{create\_all} duly creates the table in
+SQLite. Then: no module imports it, no query touches it, and it holds \textbf{0 rows} in
+the shipped database. Verified both ways, by grep and by row count.
+
+What happened is visible in \file{view\_schedule.py}: the day/week toggle state ended up
+living in a plain Python attribute, \code{self.filter\_mode}, which is set to
+\code{"Day"} at construction and flipped by the buttons. It is never persisted. The
+\code{filter} table is what persisting it would have looked like. The screen instead
+records each toggle as an \code{activity} row of type \code{Filter by Day}, which is
+logging, not state.
+\end{honest}
+
+\subsection{The foreign keys do not work, and cannot}
+\label{sec:fkbroken}
+
+This is the most substantial finding in the schema, and it was established by running
+SQLite against the shipped file, not by reading.
+
+\begin{keyidea}{SQLite does not enforce foreign keys unless you ask it to}
+Almost every other database enforces foreign keys by default. SQLite does not: for backward
+compatibility, foreign-key enforcement is \textbf{off} unless the connection issues
+\code{PRAGMA foreign\_keys = ON}. Verified on the shipped file: the pragma reads
+\code{0}. Nothing in \file{student\_database.py} or \file{queries.py} turns it on. So every
+\code{ForeignKey} in the model is, at runtime, pure documentation.
+\end{keyidea}
+
+Demonstrated directly against a copy of the database, with enforcement at its default:
+
+\begin{lstlisting}[language=SQL,caption={A row referencing a student who does not exist and a course that does not exist. Accepted without complaint.}]
+INSERT INTO course VALUES (99999, 88888, 'ZZ', 0, NULL, NULL, NULL);
+-- ACCEPTED. No such course_list_id 99999. No such std_id 88888.
+\end{lstlisting}
+
+Now the twist. You might think the fix is one line: turn the pragma on. It is not, because
+the foreign keys as declared are \emph{structurally invalid} and SQLite will refuse them:
+
+\begin{lstlisting}[language=SQL,caption={With enforcement enabled, the schema itself errors.}]
+PRAGMA foreign_keys = ON;
+PRAGMA foreign_key_check;
+-- OperationalError: foreign key mismatch - "activity" referencing "course_list"
+
+INSERT INTO course VALUES (99999, 88888, 'ZZ', 0, NULL, NULL, NULL);
+-- OperationalError: foreign key mismatch - "course" referencing "course"
+\end{lstlisting}
+
+\begin{honest}{Why the foreign keys are invalid: they reference half of a composite key}
+A foreign key must point at a set of columns that is unique in the parent table. Two of
+these do not:
+
+\begin{itemize}
+  \item \code{course.course\_id} and \code{activity.course\_id} both reference
+        \code{course\_list.course\_list\_id}. But \code{course\_list}'s primary key is the
+        \emph{pair} \code{(course\_list\_id, section)}. \code{course\_list\_id} alone is
+        \textbf{not unique}: id 201 appears three times, once per section. So the FK
+        points at something that does not identify a row, and SQLite calls it a mismatch.
+        The correct declaration is a composite FK on \code{(course\_id, section)}.
+  \item \code{course.swap\_id} and \code{course.remove\_id} reference
+        \code{course.course\_id}, which is likewise only one third of \code{course}'s
+        composite PK \code{(course\_id, std\_id, section)}. Same mismatch. The
+        commented-out lines just above them in the source show the author already
+        wrestling with which table these should point at.
+\end{itemize}
+
+The two facts compose into the finding: \textbf{the schema's referential integrity is
+broken, and the only reason nothing has ever failed is that SQLite was never asked to
+check it.} Turn the pragma on and the application stops working. For a Databases course
+project this is the thing to be able to explain, and it is entirely explicable: composite
+primary keys make foreign keys harder, SQLAlchemy will happily emit an FK clause it cannot
+validate, and SQLite's silence removed the feedback that would have caught it. The fix is
+\code{ForeignKeyConstraint(['course\_id','section'], ['course\_list.course\_list\_id','course\_list.section'])}
+declared at the table level instead of two column-level \code{ForeignKey} calls.
+\end{honest}
+
+\subsection{A relationship that is quietly mis-declared}
+
+\begin{honest}{\code{Course.course\_list} is declared one-to-one and is not}
+\file{student\_database.py} declares:
+
+\begin{lstlisting}[language=Python]
+course_list = relationship('CourseList', foreign_keys=[course_id],
+                           back_populates='course')
+\end{lstlisting}
+
+with the source comment ``Define one-to-one relationship between Course and CourseList''.
+Because it joins on \code{course\_id} alone and ignores \code{section}, a
+\code{Course} row for course 201 matches all \emph{three} \code{course\_list} rows for 201.
+This is not theoretical. Running the query layer surfaced it immediately as a real
+SQLAlchemy warning:
+
+\begin{lstlisting}
+SAWarning: Multiple rows returned with uselist=False for lazily-loaded
+attribute 'Course.course_list'
+\end{lstlisting}
+
+The application never trips over this because no screen uses the relationship. Every screen
+instead calls \code{get\_course\_by\_id\_and\_section(course\_id, section)}, which does the
+join by hand with both columns and gets the right answer. So the ORM relationship is dead
+weight that is also wrong, and the manual query beside it is correct. That is the same
+root cause as Section~\ref{sec:fkbroken}: half of the composite key was dropped.
+\end{honest}
+
+\subsection{The import-time side effects}
+
+\begin{lstlisting}[language=Python,caption={The tail of \file{student\_database.py}. All of this runs on \code{import}.}]
+engine = create_engine('sqlite:///student.db', echo=True)
+...
+Base.metadata.create_all(engine)
+Session = sessionmaker(bind=engine)
+session = Session()
+session.close()
+\end{lstlisting}
+
+\begin{honest}{Importing any screen creates an engine, writes the schema, and spams SQL}
+Four things happen the moment \emph{anything} does \code{import queries}, because
+\file{queries.py} imports \file{student\_database}:
+\begin{enumerate}
+  \item An engine is created against \file{student.db}, bound to the current working
+        directory.
+  \item \code{echo=True} means SQLAlchemy prints \textbf{every SQL statement it ever
+        emits} to the terminal, forever, for the life of the process.
+  \item \code{create\_all(engine)} runs, touching the database file and creating any
+        missing table.
+  \item A module-global \code{session} is opened, then immediately \code{close()}d.
+\end{enumerate}
+The README already flags this. Two extra things worth knowing that it does not say.
+
+First, the \code{session.close()} on the last line looks like a bug and is not, quite:
+SQLAlchemy sessions re-open a connection lazily on next use, so the module-global
+\code{session} that every query in \file{queries.py} uses still works. It is confusing and
+pointless, but harmless.
+
+Second, and more seriously: \textbf{there is exactly one session for the whole process},
+shared by every screen. It is never committed or rolled back on any boundary the user can
+see. Combined with the non-atomic swap in Section~\ref{sec:swap}, that shared session is
+the thing that makes a half-finished operation stick.
+\end{honest}
+
+\subsection{The dead model file}
+
+\begin{honest}{\file{courses\_database.py} defines a second, incompatible \code{Student}}
+The README describes \file{courses\_database.py} as ``a seeding helper for the course
+catalog''. \textbf{Read the file: it is not.} It contains no course data and no seeding
+code at all. What it contains is a second SQLAlchemy \code{Base}, a second engine against
+the same \file{student.db}, and a second \code{Student} model whose primary key is called
+\code{id} (not \code{std\_id}) and whose \code{dob} is a \code{String} (not a \code{Date}).
+Both of those contradict the real \code{student} table. Everything else in the file is
+commented out.
+
+Verified: \code{grep} finds no module that imports \code{courses\_database}. It is dead,
+its \code{create\_all} is commented out (which is the only reason it has never corrupted
+anything), and the README's one-line description of it is wrong. This file should be
+deleted. If an interviewer opens it expecting the seeding helper the README promised, you
+want to be the one who already knows.
+\end{honest}
+
+% =====================================================================
+\section{The enrollment rules}
+\label{sec:rules}
+
+This is the functional heart of the project. There are four operations the student can
+perform on their timetable, and each has its own rules, enforced at different layers and
+with different degrees of rigour.
+
+\subsection{The cart: a two-phase commit, done by hand}
+
+\begin{keyidea}{Adding is not enrolling}
+The project separates \textbf{choosing} from \textbf{committing}, exactly like an online
+shop. \file{add\_courses.py} is the cart: picking a course writes a \code{course} row with
+\code{is\_temp=True, type="Add"}. Nothing about the catalogue changes; no seat is taken.
+Only when the student goes to \file{enroll.py} and presses Enroll does the flag flip to
+\code{is\_temp=False, type=NULL} and the seat count move.
+
+The value of the split is that a cart can be abandoned. The cost is that a
+\code{course} row means two different things depending on a boolean, and every query in
+\file{queries.py} has to remember to filter on it. Several do; one, as we will see, does
+not.
+\end{keyidea}
+
+\begin{figure}[H]
+\centering
+\resizebox{0.94\textwidth}{!}{
+\begin{tikzpicture}[node distance=14mm]
+  \node[box, fill=white] (none) {\textbf{no row}\\\scriptsize not in cart, not enrolled};
+  \node[box, right=52mm of none, fill=accent!15] (cart)
+    {\textbf{in cart}\\\code{is\_temp = True}\\\code{type = "Add"}};
+  \node[box, right=52mm of cart, fill=okgreen!15] (enr)
+    {\textbf{enrolled}\\\code{is\_temp = False}\\\code{type = NULL}};
+
+  \draw[flow] (none) -- node[lbl,above=1pt]{\code{add\_course()}\\\scriptsize Add button,\\\scriptsize add\_courses.py} (cart);
+  \draw[flow] (cart) -- node[lbl,above=1pt]{{\scriptsize\ttfamily is\_temp\_false\_}\\{\scriptsize\ttfamily remove\_type\_add("Add")}\\\scriptsize enroll.py, Enroll button} (enr);
+
+  \draw[flow] (cart) to[out=140,in=40,looseness=1.1]
+     node[lbl,above]{\code{remove\_course()} \scriptsize Remove button} (none);
+  \draw[flow] (enr) to[out=-140,in=-40,looseness=0.55]
+     node[lbl,below,pos=0.5]{\code{remove\_course()} \scriptsize Drop button, drop\_courses.py\\
+       \scriptsize and the \emph{first half} of a swap} (none);
+
+  \draw[flow, draw=warnred] (enr) to[out=40,in=140,looseness=4]
+     node[lbl,above]{\scriptsize swap: enr $\rightarrow$ none $\rightarrow$ cart $\rightarrow$ enr,\\
+       \scriptsize in three separate commits (\S\ref{sec:swap})} (enr);
+
+  \node[below=22mm of cart, font=\scriptsize\itshape, text=black!60, align=center]
+    {The only two persisted states of an enrollment. Everything else the UI shows\\
+     (the catalogue's Open/Closed, the day/week toggle) lives elsewhere.};
+\end{tikzpicture}}
+\caption{The lifecycle of a \code{course} row. The red self-loop is the swap, and it is the
+one transition that is not safe.}
+\label{fig:cartsm}
+\end{figure}
+
+\subsection{Rule 1: can this course be added?}
+
+The gate is \code{AddCoursesWindow.can\_the\_course\_be\_added(course\_id, start\_time,
+end\_time, days)}, backed by a second check inside \code{AllQueries.add\_course}.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.98\textwidth}{!}{
+\begin{tikzpicture}[node distance=9mm]
+  \node[box] (start) {Add button clicked\\\scriptsize on the selected catalogue row};
+  \node[dec, below=of start, text width=24mm] (incart) {already a row\\for this\\course id\\in the cart?};
+  \node[dec, below=11mm of incart, text width=24mm] (enrolled) {already\\\emph{enrolled} in\\this course id?};
+  \node[dec, below=11mm of enrolled, text width=24mm] (clash) {timings clash\\with anything\\already held?};
+  \node[dec, below=11mm of clash, text width=24mm] (closed) {status\\column reads\\"Closed"?};
+  \node[dec, below=11mm of closed, text width=26mm] (dup) {\code{check\_if\_course}\\\code{\_already\_exist}\\(id + section)?};
+  \node[box, below=11mm of dup, fill=okgreen!15] (ok) {\textbf{INSERT} course row\\\code{is\_temp=True, type="Add"}\\then log an \code{"Add"} activity};
+
+  \node[box, right=38mm of incart, fill=warnred!12, draw=warnred]
+       (r1) {\scriptsize "Cannot add the same course twice"};
+  \node[box, right=38mm of enrolled, fill=warnred!12, draw=warnred]
+       (r2) {\scriptsize "Cannot add the same course twice"};
+  \node[box, right=38mm of clash, fill=warnred!12, draw=warnred]
+       (r3) {\scriptsize "Timings clash"};
+  \node[box, right=38mm of closed, fill=warnred!12, draw=warnred]
+       (r4) {\scriptsize "Course is closed"};
+  \node[box, right=38mm of dup, fill=warnred!12, draw=warnred]
+       (r5) {\scriptsize "Course could not be added"};
+
+  \draw[flow] (start) -- (incart);
+  \draw[flow] (incart) -- node[lbl,left]{no} (enrolled);
+  \draw[flow] (enrolled) -- node[lbl,left]{no} (clash);
+  \draw[flow] (clash) -- node[lbl,left]{no} (closed);
+  \draw[flow] (closed) -- node[lbl,left]{no} (dup);
+  \draw[flow] (dup) -- node[lbl,left]{no} (ok);
+
+  \draw[flow] (incart) -- node[lbl,above]{yes} (r1);
+  \draw[flow] (enrolled) -- node[lbl,above]{yes} (r2);
+  \draw[flow] (clash) -- node[lbl,above]{yes} (r3);
+  \draw[flow] (closed) -- node[lbl,above]{yes} (r4);
+  \draw[flow] (dup) -- node[lbl,above]{yes} (r5);
+
+  \node[extbox, left=14mm of clash, text width=38mm]
+    {\scriptsize checks against \emph{all} the student's rows, cart included:\\[2pt]
+     {\tiny\ttfamily get\_days\_timings\_of\_}\\{\tiny\ttfamily all\_courses\_by\_id\_}\\{\tiny\ttfamily temp\_false()}};
+  \draw[dflow] (clash) -- (clash-|-3,0);
+\end{tikzpicture}}
+\caption{The add gate, in the order the code actually evaluates it. Note the first four
+tests live in the window class and only the last lives in the query layer.}
+\label{fig:addflow}
+\end{figure}
+
+Three things about that flowchart are worth stopping on.
+
+\begin{honest}{The ``already added'' rule is by course id, so you cannot take two sections
+of one course, and the duplicate check disagrees with itself}
+The two top gates compare \textbf{course id only}, ignoring section. So having 201/L1 in
+your cart blocks you from adding 201/L2. That is almost certainly the intent (you take one
+section of a course), and the message ``Cannot add the same course twice'' says so.
+
+But the last gate, \code{check\_if\_course\_already\_exist(course\_id, section)} inside
+\code{AllQueries.add\_course}, compares \textbf{id and section together}. So the query layer
+would happily allow 201/L1 and 201/L2 to coexist; only the UI stops it. And the database
+agrees with the query layer, because \code{course}'s primary key includes \code{section}.
+
+So the rule ``one section per course'' is enforced in exactly one place, the weakest one:
+a window class. Nothing in the schema or the data layer encodes it. Anything that inserts
+by another path, including \code{swap\_courses}, bypasses it entirely.
+\end{honest}
+
+\begin{honest}{\code{get\_days\_timings\_of\_all\_courses\_by\_id\_temp\_false} does not
+filter on \code{is\_temp}}
+Read the name, then read the body:
+\begin{lstlisting}[language=Python]
+def get_days_timings_of_all_courses_by_id_temp_false(self):
+    std_id = self.glob_id
+    course_list_query = session.query(Course).filter_by(std_id=std_id).all()
+\end{lstlisting}
+No \code{is\_temp=False}. Its sibling one method above, \code{get\_timings\_of\_all\_
+courses\_by\_id}, does filter. So the method whose name promises to exclude cart rows is
+the one that includes them.
+
+Here is the subtle part, and it is worth getting right rather than just calling it a bug:
+\textbf{the unfiltered behaviour is the behaviour the cart actually needs}. When you are
+adding a third course, you want it checked against your enrolled courses \emph{and} the two
+already in your cart. If it filtered as its name promises, you could fill a cart with three
+mutually clashing courses and enroll in all of them. So the code is right and the name is
+a lie. That is a much better thing to say in an interview than ``there is a bug''. The fix
+is a rename, to something like \code{get\_days\_timings\_of\_all\_courses\_by\_id}, and
+a comment saying why the cart counts.
+\end{honest}
+
+\begin{honest}{The clash check runs before the closed check, and both run before either matters}
+In \code{add\_course}, \code{can\_the\_course\_be\_added(...)} is called on line 216 and
+its result is stored, then the \code{status == "Closed"} test runs on line 219 and returns
+first. So on a closed course that also clashes, the user sees the ``Timings clash'' warning
+popup (raised from inside the clash check) and \emph{then} the ``Course is closed'' popup.
+Two dialogs for one click. Cosmetic, but it is the kind of thing a demo surfaces.
+\end{honest}
+
+\subsection{Rule 2: the clash detector}
+\label{sec:clash}
+
+This is the most algorithmically interesting code in the project. It answers: does the
+candidate section overlap in time, on a shared day, with anything the student already
+holds?
+
+\begin{jargon}{Interval overlap}
+Two time intervals overlap if one starts before the other ends and ends after the other
+starts. The naive way to test it is to enumerate cases: does A's start fall inside B? does
+A's end fall inside B? does A completely contain B? Those three cases are exhaustive, and
+they are exactly the three conditions this code tests.
+\end{jargon}
+
+The code works in two steps: reduce times to a comparable number, then compare.
+
+\begin{lstlisting}[language=Python,caption={\file{queries.py}: times become integers.}]
+def time_to_seconds(self, t):
+    return t.hour * 3600 + t.minute * 60 + t.second
+
+def get_days_list(self, days):
+    return [days[x:x + 2] for x in range(0, len(days), 2)]
+\end{lstlisting}
+
+\code{get\_days\_list} is how \code{"MoWe"} becomes \code{['Mo', 'We']}: it slices the
+string into two-character chunks. This is the entire day-encoding scheme, and it is why
+the catalogue must never contain a day code of any other length.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.95\textwidth}{!}{
+\begin{tikzpicture}[xscale=1.25]
+  % axis
+  \draw[->, thick, draw=inkblue] (0,0) -- (11.4,0) node[right,font=\scriptsize] {time (seconds since midnight)};
+  \foreach \x/\l in {0/08:30, 2/10:00, 4/11:30, 6/13:00, 8/14:30, 10/16:00}
+    \draw[draw=linegrey] (\x,-0.12) -- (\x,0.12) node[below=3pt,font=\scriptsize\ttfamily,text=black!60] {\l};
+
+  % existing course
+  \draw[fill=inkblue!18, draw=inkblue] (4,0.45) rectangle (5.7,1.05);
+  \node[font=\scriptsize, text=inkblue] at (4.85,0.75) {already held};
+  \node[font=\tiny\ttfamily, text=black!60] at (4.85,1.3) {start\_timings[i] .. end\_timings[i]};
+
+  % case A
+  \draw[fill=warnred!18, draw=warnred] (5.0,-1.15) rectangle (6.8,-0.55);
+  \node[font=\scriptsize\bfseries, text=warnred] at (5.9,-0.85) {A};
+  \node[font=\scriptsize, text=warnred, anchor=west] at (7.0,-0.85) {new start inside:};
+  \node[font=\tiny\ttfamily, text=black!60, anchor=west] at (9.3,-0.85)
+    {start[i] <= new\_start <= end[i]};
+
+  % case B
+  \draw[fill=warnred!18, draw=warnred] (2.6,-2.05) rectangle (4.4,-1.45);
+  \node[font=\scriptsize\bfseries, text=warnred] at (3.5,-1.75) {B};
+  \node[font=\scriptsize, text=warnred, anchor=west] at (7.0,-1.75) {new end inside:};
+  \node[font=\tiny\ttfamily, text=black!60, anchor=west] at (9.3,-1.75)
+    {start[i] <= new\_end <= end[i]};
+
+  % case C
+  \draw[fill=warnred!18, draw=warnred] (3.2,-2.95) rectangle (6.5,-2.35);
+  \node[font=\scriptsize\bfseries, text=warnred] at (4.85,-2.65) {C};
+  \node[font=\scriptsize, text=warnred, anchor=west] at (7.0,-2.65) {new envelops held:};
+  \node[font=\tiny\ttfamily, text=black!60, anchor=west] at (9.3,-2.65)
+    {new\_start <= start[i] and new\_end >= end[i]};
+
+  % case D no clash
+  \draw[fill=okgreen!18, draw=okgreen] (8.4,-3.85) rectangle (10.2,-3.25);
+  \node[font=\scriptsize\bfseries, text=okgreen] at (9.3,-3.55) {D};
+  \node[font=\scriptsize, text=okgreen, anchor=west] at (10.4,-3.55) {no overlap};
+  \node[font=\tiny\itshape, text=black!60, anchor=west] at (0,-4.3)
+    {(and: only tested at all if the two courses share a two-character day code)};
+
+  \draw[dashed, draw=inkblue!40] (4,1.05) -- (4,-4.0);
+  \draw[dashed, draw=inkblue!40] (5.7,1.05) -- (5.7,-4.0);
+\end{tikzpicture}}
+\caption{The three overlap cases the clash detector tests, drawn against one already-held
+section. A, B and C together are exhaustive: any overlap of two intervals falls into at
+least one of them.}
+\label{fig:clash}
+\end{figure}
+
+\begin{pseudocode}{The clash rule, as implemented in \code{can\_the\_course\_be\_added}}
+\Step{new\_start, new\_end := time\_to\_seconds(candidate start, end)}
+\Step{for each course the student already holds (enrolled OR in cart), as i:}
+\Indent{shared := any 2-char day code of the candidate}
+\Indent{\phantom{shared := }appears in the day codes of course i}
+\Indent{if shared:}
+\Indent{\hspace*{2em}if start[i] <= new\_start <= end[i]      -> CLASH}
+\Indent{\hspace*{2em}if start[i] <= new\_end   <= end[i]      -> CLASH}
+\Indent{\hspace*{2em}if new\_start <= start[i] and new\_end >= end[i] -> CLASH}
+\Step{return no clash}
+\end{pseudocode}
+
+\begin{honest}{Two real defects in the clash rule}
+\textbf{First, the day test is inside the wrong loop and re-derived every iteration.} The
+code reads:
+\begin{lstlisting}[language=Python]
+for i in range(len(start_timings)):
+    days_list = self.all_queries.get_days_list(days)              # candidate
+    previous_days_list = self.all_queries.get_days_list(all_days[i])  # held
+    for day in range(len(days_list)):
+        if days_list[day] in previous_days_list:
+            ... three overlap tests ...
+\end{lstlisting}
+\code{days\_list} does not depend on \code{i}, so it is recomputed on every iteration of
+the outer loop. Harmless, wasteful, and a sign the loop grew rather than being designed.
+More notably, the three overlap tests sit inside the \emph{inner} day loop, so for a
+candidate on \code{MoWe} clashing with a held course on \code{MoWe}, they run twice and
+return on the first. Correct, but only by accident of the early return.
+
+\textbf{Second, and this one is a genuine bug: touching intervals are treated as a clash.}
+All three tests use \code{<=}. A candidate starting at exactly 12:45 against a held course
+ending at exactly 12:45 satisfies \code{start[i] <= new\_start <= end[i]} and is rejected.
+Look at the real catalogue: 201/L1 runs 11:30 to 12:45 on MoWe, and back-to-back classes
+are the normal case in a university timetable. This rule forbids them. A strict
+\code{<} on the boundary comparisons is the fix. This is easy to demonstrate live and
+worth knowing before someone else demonstrates it to you.
+\end{honest}
+
+\begin{honest}{The clash rule is only ever consulted by the UI}
+\code{AllQueries.add\_course} does not call the clash checker. It is called only from
+\code{AddCoursesWindow.can\_the\_course\_be\_added} and
+\code{SwapCoursesWindow.can\_the\_course\_be\_added}, which are two separate,
+near-identical copies of the same 40 lines in two different files. So: a clash-free
+timetable is a property the \emph{windows} maintain, not a property the data layer or the
+schema guarantees, and the rule is duplicated so it can drift. It has already begun to:
+the two copies call \emph{different} query methods (the add path uses the unfiltered one
+that includes the cart; the swap path uses the filtered one with the exclusion arguments).
+\end{honest}
+
+\subsection{Rule 3: capacity, and what \code{current\_capacity} actually means}
+\label{sec:capacity}
+
+\begin{keyidea}{\code{current\_capacity} counts \emph{empty seats}, not filled ones}
+This is the single most counter-intuitive thing in the codebase, and the column name
+actively works against you. Read \code{update\_current\_capacity}:
+enrolling calls it with \code{"Subtract"}; dropping calls it with \code{"Add"}. So the
+number goes \emph{down} as students join. It is \textbf{remaining seats}.
+
+The shipped data confirms it: untouched sections read \code{current\_capacity = 50}, equal
+to \code{max\_capacity}, and the sections with enrollments read 47. A name like
+\code{seats\_remaining} would have removed all doubt.
+\end{keyidea}
+
+\begin{lstlisting}[language=Python,caption={\file{queries.py}, the whole capacity rule.}]
+def update_current_capacity(self, course_id, section, add_or_subtract):
+    course = session.query(CourseList).filter_by(course_list_id=course_id,
+                                                 section=section).first()
+    if add_or_subtract == "Add":
+        course.current_capacity += 1
+    elif add_or_subtract == "Subtract":
+        course.current_capacity -= 1
+
+    if course.current_capacity == 0:
+        course.status = False
+    elif course.current_capacity > 0:
+        course.status = True
+    else:
+        print("Error: current_capacity is negative")
+        return False
+    ...
+\end{lstlisting}
+
+So \code{status} is a derived flag: false (``Closed'') exactly when no seats remain. The
+catalogue screens hide any section whose \code{status} is false, which is how a full
+section disappears from the list.
+
+This was verified by running the real method against a copy of the database:
+
+\begin{lstlisting}[caption={Executed against a copy of \file{student.db}. Output is real.}]
+201/L2 before:                 max=50, current=50, status=True
+after an ENROLL  (Subtract):   max=50, current=49, status=True
+after two DROPs  (Add, Add):   max=50, current=51, status=True   <-- exceeds max
+\end{lstlisting}
+
+\begin{honest}{\code{max\_capacity} is never read by a single line of code}
+Verified by grep across every \file{.py} and \file{.ui}: the only occurrence of
+\code{max\_capacity} anywhere in the project is the column declaration itself. It is
+written into the seed data and never consulted again. The ceiling on a section is not
+enforced; only the floor is (\code{current\_capacity == 0} closes it).
+
+The consequence is not hypothetical. \textbf{The shipped database already contains two
+sections that are over capacity}: 330/L3 and 310/L2 both have
+\code{current\_capacity = 51} against \code{max\_capacity = 50}. Somebody dropped a course
+they had never enrolled in (or the seat count was decremented once and incremented twice),
+and nothing stopped the counter climbing past the maximum. Those rows are in the file you
+would demo from.
+
+The fix is two lines in the same function that already has the ``negative'' branch: refuse
+to increment past \code{max\_capacity}, and refuse to decrement below zero \emph{before}
+committing rather than after. Note the existing negative branch returns \code{False} only
+\emph{after} having already mutated the object, and its caller in \file{enroll.py} shows
+``Invalid capacity'' and returns, leaving the session holding a dirty object. It happens
+not to be committed on that path, but nothing rolls it back either.
+\end{honest}
+
+\begin{honest}{Capacity is not decremented where you would expect}
+Adding to the cart deliberately does \emph{not} take a seat: the
+\code{update\_current\_capacity} call in \file{add\_courses.py} is present but commented
+out. Only Enroll takes the seat. This is the right call (a cart should not hold
+inventory), but it also means there is \textbf{no reservation}: two students can both pass
+the ``Open'' check, both fill their carts with the last seat, and both enroll. The second
+one drives \code{current\_capacity} to $-1$, at which point the negative branch fires,
+\code{status} is left stale, and the user sees ``Invalid capacity''. For a single-user
+coursework demo this never happens. It is the honest answer to ``what breaks if two
+students use this at once'', and the answer is: the seat count, immediately, because there
+is no locking and no constraint.
+\end{honest}
+
+\subsection{Rule 4: the swap}
+\label{sec:swap}
+
+A swap moves the student from one section of a course to another section of the
+\emph{same} course. The UI enforces exactly that:
+
+\begin{lstlisting}[language=Python,caption={\file{swap\_courses.py}. Note the comment describes the opposite of the code.}]
+# if section and course_id same then show messagebox and return
+if course_id != course_id_enrolled:
+    QMessageBox.warning(self, "Error", "Cannot swap different courses.")
+    return
+
+if course_id == course_id_enrolled and section == section_enrolled:
+    QMessageBox.warning(self, "Error", "Cannot swap the same course.")
+    return
+\end{lstlisting}
+
+So the two rules are: the courses must match, and the sections must differ. The Select
+button already filters the second table to sections of the chosen course, via
+\code{get\_all\_courses\_by\_std\_id\_}\-\code{and\_course\_id}, so the first rule mostly
+guards against the user clicking around it.
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tikzpicture}[node distance=6mm]
+  % lifelines
+  \node[box, fill=accent!15] (ui) at (0,0) {SwapCoursesWindow\\\scriptsize swap\_courses.py};
+  \node[box, fill=softgrey] (q) at (5.4,0) {AllQueries.swap\_courses\\\scriptsize queries.py};
+  \node[store] (db) at (11.0,0) {student.db};
+
+  \draw[draw=linegrey, thick] (ui) -- (0,-9.4);
+  \draw[draw=linegrey, thick] (q) -- (5.4,-9.4);
+  \draw[draw=linegrey, thick] (db) -- (11.0,-9.4);
+
+  \draw[flow] (0,-1.0) -- node[lbl,above]{swap\_courses(new, section, old, old\_section)} (5.4,-1.0);
+
+  \draw[flow] (5.4,-2.0) -- node[lbl,above]{\textbf{1. remove\_course(old)} -> DELETE} (11.0,-2.0);
+  \draw[flow] (11.0,-2.5) -- node[lbl,above]{\textbf{COMMIT} \scriptsize the old course is now gone, on disk} (5.4,-2.5);
+
+  \draw[flow] (5.4,-3.5) -- node[lbl,above]{\textbf{2. add\_course(new)} -> INSERT is\_temp=True} (11.0,-3.5);
+
+  \draw[flow, draw=warnred] (5.4,-4.6) -- node[lbl,above,text=warnred]{\textbf{if step 2 fails:} return False / None,\\
+       \scriptsize nothing is rolled back} (0,-4.6);
+
+  \draw[flow] (5.4,-5.6) -- node[lbl,above]{\textbf{3. is\_temp\_false\_single\_course(new)} -> UPDATE} (11.0,-5.6);
+  \draw[flow] (11.0,-6.1) -- node[lbl,above]{\textbf{COMMIT} \scriptsize now enrolled} (5.4,-6.1);
+  \draw[flow] (5.4,-6.6) -- node[lbl,above]{True} (0,-6.6);
+
+  \draw[flow] (0,-7.6) -- node[lbl,above]{4. update\_current\_capacity(old, "Add") \scriptsize give the seat back} (11.0,-7.6);
+  \draw[flow] (0,-8.4) -- node[lbl,above]{5. update\_current\_capacity(new, "Subtract") \scriptsize take the new seat} (11.0,-8.4);
+  \draw[flow] (0,-9.2) -- node[lbl,above]{6. log a "Swap" activity: "201 -> 201", "L3 -> L2"} (11.0,-9.2);
+
+  \node[draw=warnred, fill=warnred!8, rounded corners=2pt, text width=52mm,
+        font=\scriptsize, align=left] at (16.5,-4.0)
+    {\textbf{The unsafe window.}\\[2pt]
+     Step 1 commits before step 2 runs. There is no transaction spanning them. If step 2
+     fails, the student has \emph{lost} the old course and gained nothing, the seat counts
+     in steps 4 and 5 never run, and the UI reports\\
+     \textit{``Course could not be swapped.''}\\[2pt]
+     Which is false. Something very much happened.};
+
+\end{tikzpicture}}
+\caption{The swap, step by step, showing where the atomicity is missing. Verified by
+execution, below.}
+\label{fig:swapseq}
+\end{figure}
+
+\begin{jargon}{Atomicity and transactions}
+An operation is \textbf{atomic} if it either happens completely or not at all, with no
+observable in-between. Databases provide this with a \textbf{transaction}: you begin one,
+make several changes, and \code{COMMIT} them as a single indivisible act, or
+\code{ROLLBACK} to undo the lot. A swap is the textbook case: ``delete the old, insert the
+new'' must be atomic, or a crash between the two loses the student's course. This is the
+`A' in ACID, and it is a core Databases-course concept, which makes it the most important
+finding in this document.
+\end{jargon}
+
+\begin{honest}{The swap is not atomic, and it destroys data. Verified by running it.}
+\code{AllQueries.swap\_courses} calls \code{remove\_course()} first, which does
+\code{session.delete(course)} followed by its own \code{session.commit()}. That commit is
+unconditional and it is outside the \code{try} block that guards the add. Only then does
+it attempt \code{add\_course()}.
+
+This was tested directly against a copy of the shipped database, by asking for a swap onto
+a section that does not exist so that step 2 must fail:
+
+\begin{lstlisting}[caption={Executed against a copy of \file{student.db}. Output is real.}]
+enrolled rows for student 20180 before:
+    [(201,'L1'), (202,'S2'), (205,'L3'), (330,'L3'), (310,'L2')]
+
+swap_courses(new=999/'ZZ' (nonexistent), old=201/'L1')  ->  returned: None
+
+enrolled rows for student 20180 after:
+    [(202,'S2'), (205,'L3'), (330,'L3'), (310,'L2')]
+
+LOST:   [(201, 'L1')]
+GAINED: []
+\end{lstlisting}
+
+The student's enrollment in 201/L1 was deleted and committed, the replacement was never
+created, and the function returned \code{None}. \code{None} is falsy, so the caller in
+\file{swap\_courses.py} takes the \code{if not can\_be\_added:} branch and shows the user
+\textit{``Course could not be swapped.''} The user is told nothing happened. They have in
+fact just lost a course, permanently, and the seat is not even returned to the pool because
+steps 4 and 5 are below the early return.
+
+Note also the bare \code{except:} inside \code{swap\_courses} ends in \code{return} with no
+value, which is why the function returns \code{None} rather than \code{False}. Two
+different falsy failure signals from one function.
+
+\textbf{The fix is small and you should be able to state it instantly}: wrap steps 1 to 3
+in one transaction. Do not commit inside \code{remove\_course} when it is called from a
+swap; do the delete, do the insert, and commit once, with \code{session.rollback()} in the
+except. SQLAlchemy gives you this for free with \code{with session.begin():}. The reason
+it was not done is visible in the code: \code{remove\_course} and \code{add\_course} were
+each written to be self-contained, committing operations for their own screens, and
+\code{swap\_courses} reuses them as-is. Composing two atomic operations does not give you
+an atomic operation. That sentence is the whole lesson.
+
+And this is what the dead \code{swap\_id} / \code{remove\_id} columns were for. The
+original design was going to \emph{link} the new row to the old one rather than delete and
+re-insert. That design would not have had this bug.
+\end{honest}
+
+\subsection{Rule 5: the drop}
+
+The simplest path, in \file{drop\_courses.py}: confirm with a Yes/No dialog, delete the
+\code{course} row, return the seat with \code{update\_current\_capacity(..., "Add")},
+remove the table row, log a \code{"Drop"} activity. There is no rule about
+\emph{whether} you may drop; you always may.
+
+\begin{honest}{The drop screen's column headers do not line up with its data}
+\code{setup\_drop\_courses\_table} sets nine headers:
+\code{["Course ID", "Course Name", "Section", "Instructor", "Days", "Start Time", "End Time", "Room", "Status"]}.
+Then it fills only \emph{eight} columns, because it merges start and end into one:
+
+\begin{center}
+\begin{tabular}{@{}clll@{}}
+\toprule
+col & header says & the code actually puts there & \\
+\midrule
+4 & Days & days & ok \\
+5 & Start Time & \code{"11:30:00 - 12:45:00"} & both times in one cell \\
+6 & End Time & \textbf{room} & wrong \\
+7 & Room & \textbf{status} & wrong \\
+8 & Status & \textbf{nothing} & empty column \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+So on the drop screen the room number appears under a heading that says ``End Time'', the
+word ``Open'' appears under ``Room'', and the last column is blank. This is a visible
+defect on a screen a demo will certainly open. The functional part is unaffected, since
+\code{drop\_course} reads columns 0 and 2, which are still correct.
+\end{honest}
+
+\subsection{The enroll screen, and a bug that cancels itself out}
+\label{sec:checkstate}
+
+\file{enroll.py} is the checkout. It lists everything in the cart
+(\code{get\_all\_courses\_by\_id\_and\_type("Add")}), refuses if any row reads ``Closed'',
+then flips the whole cart to enrolled, then decrements a seat for each row.
+
+\begin{lstlisting}[language=Python,caption={\file{enroll.py}, \code{enroll\_action}. The order matters.}]
+for row in range(self.schedule_table_widget.rowCount()):
+    if self.schedule_table_widget.item(row, 8).text() == "Closed":
+        QMessageBox.about(self, "Enroll", "You cannot enroll in a closed course")
+        return
+
+self.all_queries.is_temp_false_remove_type_add("Add")     # <-- commits EVERYTHING
+QMessageBox.about(self, "Enroll", "You have successfully enrolled ...")
+
+course_ids = []
+for row in range(self.schedule_table_widget.rowCount()):
+    if self.schedule_table_widget.item(row, 0).checkState():   # <-- always True
+        course_ids.append(self.schedule_table_widget.item(row, 0).text())
+\end{lstlisting}
+
+\begin{honest}{\code{if item.checkState():} is always true in PyQt6. Verified.}
+The intent is clearly ``only the rows the user ticked''. It does not work, and the reason
+is a genuine PyQt5-to-PyQt6 migration trap.
+
+In PyQt5, \code{checkState()} returned a plain integer, and \code{Qt.Unchecked} was
+\code{0}, so \code{if item.checkState():} was false for an unticked row. PyQt6 replaced
+those integer constants with real Python enums, and \textbf{a Python enum member is truthy
+regardless of its value} unless the enum defines otherwise. \code{Qt.CheckState} is a plain
+\code{enum.Enum}, not an \code{IntEnum}.
+
+Verified by installing PyQt6 6.11 in a throwaway environment and asking:
+\begin{lstlisting}
+>>> repr(Qt.CheckState.Unchecked)
+<CheckState.Unchecked: 0>
+>>> bool(Qt.CheckState.Unchecked)
+True
+\end{lstlisting}
+So the condition is true for every row, ticked or not. The whole cart is always collected.
+
+Now the interesting part: \textbf{this bug has no visible effect}, for two compounding
+reasons. First, \code{is\_temp\_false\_remove\_type\_add("Add")} on the line above has
+already enrolled the entire cart in the database before the loop runs; the loop only
+decides what gets logged and whose seat gets taken. Second, no code ever calls
+\code{setCheckState} on these items and the table is set to \code{NoEditTriggers}, so no
+checkbox is ever shown and the user could not tick anything anyway. The intended feature
+does not exist in the UI, and the code that would have implemented it is broken in a way
+that happens to produce the behaviour the rest of the screen assumes: enroll everything.
+
+Two wrongs make a right here. It is a much better story than a bug: it shows you can trace
+a defect to the exact language-level semantics that caused it, and then judge honestly that
+it does not currently matter. What it \emph{does} mean is that the dead code should be
+deleted, because the day someone adds real checkboxes, this silently enrolls the unticked
+ones too.
+\end{honest}
+
+\begin{honest}{The success dialog fires before the work that can fail}
+``You have successfully enrolled in the selected courses'' is shown immediately after the
+\code{is\_temp} flip and \emph{before} the capacity loop. If
+\code{update\_current\_capacity} then returns false, the user gets ``Invalid capacity''
+straight after being congratulated. This is the same pattern the attendance module
+deliberately avoids (Section~\ref{sec:attendance}), which makes the inconsistency worth
+noting: the newer code learned the lesson, the older code did not.
+\end{honest}
+
+% =====================================================================
+\section{The data-access layer}
+
+\code{AllQueries} in \file{queries.py} is 410 lines and about 25 methods, and it is the
+project's best structural idea: no window ever writes a query, so the screens agree on a
+contract. The README says this was deliberate, to keep a two-person team's merges
+tractable, and the code bears that out.
+
+\subsection{\code{glob\_id}: how the layer knows who you are}
+
+Every method that touches student-specific data begins the same way:
+
+\begin{lstlisting}[language=Python]
+def get_all_courses_by_id(self):
+    std_id = self.glob_id
+    ...
+\end{lstlisting}
+
+\code{glob\_id} is set in \code{\_\_init\_\_} to a hardcoded \code{20180} and then
+overwritten by every screen with
+\code{self.all\_queries.update\_std\_id(self.all\_queries.get\_std\_id\_by\_email(self.email))}.
+
+\begin{honest}{The README overstates this one, and the truth is more interesting}
+The README's ``What I learned'' says: \textit{``\code{AllQueries.glob\_id} (defaulting to a
+hardcoded 20180) is set by whichever window ran last, so the query layer's correctness
+depends on call order.''}
+
+Read the code: \code{glob\_id} is assigned in \code{\_\_init\_\_}, so it is an
+\textbf{instance} attribute, not a class attribute. Every screen constructs its \emph{own}
+\code{AllQueries()} and immediately sets its own \code{glob\_id} from its own
+\code{self.email}. So screens do not clobber each other's student id, and the stated
+call-order hazard does not exist as described. Correct the README rather than repeat this
+claim in an interview: the fix is one word, ``instance'', and being the person who caught
+it is better than being the person who recited it.
+
+The real hazards are different and both worth defending:
+
+\textbf{1. The default 20180 is a live student.} It is Alice, a real row in the shipped
+database. Any \code{AllQueries()} constructed without a subsequent \code{update\_std\_id}
+silently operates \emph{as Alice}. Verified: constructing \code{AllQueries()} and reading
+\code{glob\_id} gives \code{20180} with no login of any kind. Every screen's
+\code{\_\_init\_\_} also defaults \code{email} to \code{alice20180@st.habib.edu.pk} when
+none is passed, which is what the \code{if \_\_name\_\_ == "\_\_main\_\_"} block at the
+bottom of every module does. So each screen is independently runnable as Alice, with no
+password and no verification code. That is the actual security-shaped hole, and it is a
+debugging convenience that shipped.
+
+\textbf{2. The \emph{session} genuinely is shared.} \code{session} is a module-global in
+\file{student\_database.py}, created once at import. Every \code{AllQueries} instance uses
+the same one. So the thing the README worried about is real, it is just one level down: not
+the id, the session. That is what makes the swap's partial commit in
+Section~\ref{sec:swap} durable.
+\end{honest}
+
+\subsection{Error handling, uniformly}
+
+Nearly every mutating method follows one shape:
+
+\begin{lstlisting}[language=Python]
+session.add(new_course)
+try:
+    session.commit()
+except:
+    print("Error: " + str(sys.exc_info()[0]))
+    print(traceback.format_exc())
+    session.rollback()
+    return False
+return True
+\end{lstlisting}
+
+\begin{honest}{Bare \code{except:} everywhere, and \code{print} as the logging strategy}
+\code{except:} with no exception class catches \emph{everything}, including
+\code{KeyboardInterrupt} and \code{SystemExit}. It should be \code{except Exception:} at
+minimum, and really \code{except SQLAlchemyError:}. The failure is reported by printing to
+a terminal that a GUI user is not looking at, and returning \code{False}, which some
+callers check and some ignore.
+
+The consistency is genuinely a plus: one shape, applied everywhere, is easier to fix than
+twenty bespoke ones. Replacing \code{print} with the \code{logging} module and the bare
+\code{except} with a typed one is a mechanical change across about a dozen methods. The
+README already lists this as a follow-up.
+\end{honest}
+
+\begin{honest}{\code{remove\_course} does not check that the row exists}
+\begin{lstlisting}[language=Python]
+course = session.query(Course).filter_by(...).first()
+session.delete(course)      # <-- course may be None
+try:
+    session.commit()
+\end{lstlisting}
+The \code{delete} is \emph{outside} the try. If the row is not found, \code{course} is
+\code{None} and \code{session.delete(None)} raises
+\code{UnmappedInstanceError}, which propagates past the try that was supposed to guard it,
+out of \code{remove\_course}, out of \code{swap\_courses}, and into the window's own bare
+\code{except}, where it becomes a printed traceback and a silent return. Two of the three
+callers happen to pass ids read out of a table populated from the database, so the row
+does exist. It is guarded by luck.
+\end{honest}
+
+\subsection{Two methods that do the same job}
+
+Two methods insert an \code{Activity} row:
+
+\begin{center}
+\code{add\_data\_to\_activity\_log(std\_id, activity\_type, course\_id, section)}\\[2pt]
+\code{insert\_activity(std\_id, activity\_type, description, date\_val, time\_val)}
+\end{center}
+
+\noindent There is also a third, \code{insert\_attendance\_activity}, which formats a
+string and inserts an \code{Activity} row.
+
+\begin{honest}{Three activity-insert methods; one is dead}
+\code{insert\_attendance\_activity} is never called by anything. Verified by grep:
+\file{attendance.py} calls \code{insert\_activity}. The section comment above it in
+\file{queries.py} announces
+\code{\# -------------- NEW METHOD FOR ATTENDANCE --------------}, so it is the first
+attempt, superseded by \code{insert\_activity} directly below it, and never removed. Its
+docstring even contains a smart apostrophe, marking it as pasted from somewhere else.
+
+The difference between the two survivors is that \code{add\_data\_to\_activity\_log} stamps
+the time itself with \code{datetime.now()}, while \code{insert\_activity} takes date and
+time as \emph{strings} and parses them with \code{strptime}, falling back to
+\code{now()} if parsing fails. The caller in \file{attendance.py} formats \code{now()}
+into strings, passes them, and has them parsed back. That is a round trip through text for
+no reason. One method taking a \code{datetime} would have replaced all three.
+\end{honest}
+
+Also note \code{add\_data\_to\_activity\_log} contains a query whose result is discarded:
+
+\begin{lstlisting}[language=Python]
+course = None
+if course_id is not None:
+    course = session.query(CourseList).filter_by(course_list_id=course_id).first()
+# `course` is never used again.
+\end{lstlisting}
+
+A wasted \code{SELECT} on every logged action.
+
+\subsection{The destructive \code{\_\_main\_\_} block}
+
+\begin{honest}{Running \code{python queries.py} wipes your data}
+\begin{lstlisting}[language=Python]
+if __name__ == "__main__":
+    all_queries = AllQueries()
+    all_queries.delete_all_data_activity_log()
+    all_queries.delete_everything_in_course_table()
+    print(all_queries.get_current_day())
+\end{lstlisting}
+That deletes \textbf{every row} of \code{activity} and \textbf{every row} of \code{course},
+for every student, with no confirmation, as the price of running the file. It is obviously
+a development reset script that was left in the shipped module. It should be a separate
+\file{reset\_db.py}, or at minimum behind an \code{argv} check. Note also that
+\code{delete\_all\_data\_activity\_log} and \code{delete\_everything\_in\_course\_table}
+ignore \code{glob\_id} entirely: they are not scoped to a student despite living on an
+object whose entire purpose is to scope queries to a student.
+\end{honest}
+
+% =====================================================================
+\section{Login and the verification flow}
+
+This is one of the areas the README records as Salman's, and it is the most carefully
+written code in the project.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.96\textwidth}{!}{
+\begin{tikzpicture}[node distance=9mm]
+  \node[box] (a) {user types email + password};
+  \node[dec, below=of a, text width=26mm] (b) {\code{get\_password\_}\\\code{by\_email}\\returns None?};
+  \node[dec, below=12mm of b, text width=26mm] (c) {\code{password ==}\\\code{user\_password}?};
+  \node[box, below=12mm of c, fill=accent!12] (d) {\textbf{VerificationForm} opens\\
+     \scriptsize \code{random.randint(100000, 999999)}};
+  \node[dec, below=of d, text width=30mm] (e) {\code{ATTENDANCE\_SENDER\_}\\\code{EMAIL} and
+     \code{\_PASSWORD}\\both set in the env?};
+  \node[box, below left=12mm and 6mm of e, fill=softgrey] (f)
+    {\textbf{fallback}\\\scriptsize print the code to the terminal\\
+     \scriptsize + warn "Email Not Configured"\\\scriptsize \textbf{login still completes}};
+  \node[box, below right=12mm and 6mm of e, fill=softgrey] (g)
+    {\textbf{send}\\\scriptsize smtplib -> smtp.gmail.com:587\\\scriptsize starttls, login, sendmail};
+  \node[dec, below=26mm of e, text width=26mm] (h) {typed code ==\\generated code?};
+  \node[box, below=12mm of h, fill=okgreen!15] (i) {\textbf{MainStudentWindow}\\\scriptsize the hub opens};
+
+  \node[box, right=34mm of b, fill=warnred!12, draw=warnred] (x1) {\scriptsize "Wrong credentials"};
+  \node[box, right=34mm of c, fill=warnred!12, draw=warnred] (x2) {\scriptsize "Wrong credentials"};
+  \node[box, right=34mm of h, fill=warnred!12, draw=warnred] (x3) {\scriptsize "Wrong code! Please try again."\\\scriptsize clear the box, \textbf{stay open}};
+
+  \draw[flow] (a) -- (b);
+  \draw[flow] (b) -- node[lbl,left]{no} (c);
+  \draw[flow] (c) -- node[lbl,left]{yes} (d);
+  \draw[flow] (d) -- (e);
+  \draw[flow] (e) -- node[lbl,left,pos=0.4]{no} (f);
+  \draw[flow] (e) -- node[lbl,right,pos=0.4]{yes} (g);
+  \draw[flow] (f) |- (h);
+  \draw[flow] (g) |- (h);
+  \draw[flow] (h) -- node[lbl,left]{yes} (i);
+  \draw[flow] (b) -- node[lbl,above]{yes} (x1);
+  \draw[flow] (c) -- node[lbl,above]{no} (x2);
+  \draw[flow] (h) -- node[lbl,above]{no} (x3);
+\end{tikzpicture}}
+\caption{Login and multi-factor verification, including the no-credentials fallback that
+lets anyone who clones the repository still log in.}
+\label{fig:login}
+\end{figure}
+
+\begin{jargon}{MFA, SMTP, and an App Password}
+\textbf{MFA} (Multi-Factor Authentication) means proving who you are with more than one
+kind of evidence: something you know (the password) plus something you have (access to the
+mailbox the code was sent to). \textbf{SMTP} (Simple Mail Transfer Protocol) is the
+protocol for sending mail; Python's \code{smtplib} speaks it. Gmail will not accept your
+normal password from a script, so you generate an \textbf{App Password}, a separate
+16-character secret scoped to one application, which is what
+\code{ATTENDANCE\_SENDER\_PASSWORD} is meant to hold.
+\end{jargon}
+
+\begin{keyidea}{The best decision in the project: gate the network call, then tell the truth}
+Anyone cloning this repository has no Gmail App Password. A blind \code{smtplib.SMTP(...)}
+would hang on a connect or throw, and the login would be unusable. So both email paths
+check first:
+\begin{lstlisting}[language=Python]
+sender_email = os.environ.get("ATTENDANCE_SENDER_EMAIL", "")
+sender_password = os.environ.get("ATTENDANCE_SENDER_PASSWORD", "")
+if not sender_email or not sender_password:
+    ...
+\end{lstlisting}
+and then each picks a \emph{truthful} fallback for its own context. \file{verification.py}
+prints the code to the terminal and says so in a dialog, so login completes.
+\file{attendance.py} returns \code{False} and the caller says ``confirmation emails could
+not be sent'' rather than claiming they were.
+
+That last distinction is the whole point. The lazy version returns \code{True} and shows
+``emails sent!''. This code refuses to lie to the user about something it did not do. Two
+env vars drive both paths and \file{.env.example} documents them.
+\end{keyidea}
+
+\begin{honest}{Real weaknesses in the verification flow, stated plainly}
+\begin{itemize}
+  \item \textbf{The code is held in memory on the client and compared there.}
+        \code{self.verification\_code} is a string attribute on the window;
+        \code{handle\_verification} compares the typed text to it. In a desktop app the
+        user owns the process, so this is theatre against a determined user. It is a
+        faithful demonstration of the MFA \emph{flow}, not a security control. Say that
+        rather than overselling it.
+  \item \textbf{\code{random.randint} is not cryptographic.} \code{random} is a Mersenne
+        Twister seeded predictably; \code{secrets.randbelow} is the right call for
+        anything that is supposed to be unguessable. Given the previous point, it changes
+        nothing here, but it is the correct answer to ``how would you generate that code''.
+  \item \textbf{No expiry, no attempt limit.} The code lives as long as the window and can
+        be retried without limit. A real MFA has a TTL and a lockout.
+  \item \textbf{The env vars are misnamed for one of their two jobs.} They are called
+        \code{ATTENDANCE\_SENDER\_*} and are also used for login verification, which is
+        not attendance. The README and \file{.env.example} are consistent about it, so it
+        is a naming debt rather than a trap, but a reviewer will ask.
+  \item \textbf{Failure to send closes the window.} In \code{send\_verification\_email},
+        the \code{except} shows an error and calls \code{self.close()}. But
+        \code{VerificationForm} was constructed with \code{super().\_\_init\_\_(login\_parent)},
+        and the login window was hidden by \code{handle\_login}. Reading the code, a send
+        failure leaves the verification window closed and the login window still hidden,
+        with no path back. \textbf{Inferred}, not verified: the app could not be run to
+        confirm what the user sees at that moment.
+\end{itemize}
+\end{honest}
+
+\begin{honest}{The show/hide password button is inverted}
+\begin{lstlisting}[language=Python]
+self.password_visible = False
+self.toggle_password_visibility()      # called once at construction
+
+def toggle_password_visibility(self):
+    self.password_visible = not self.password_visible
+    if self.password_visible:
+        self.show_hide_button.setText("Show")
+        self.password_textbox.setEchoMode(QLineEdit.EchoMode.Password)   # HIDDEN
+    else:
+        self.show_hide_button.setText("Hide")
+        self.password_textbox.setEchoMode(QLineEdit.EchoMode.Normal)     # VISIBLE
+\end{lstlisting}
+The branch where \code{password\_visible} is \code{True} is the branch that \emph{hides}
+the password. The flag means the opposite of its name. The labels happen to read correctly
+if you interpret them as ``click me to Show'', and the constructor's warm-up call happens
+to leave the box masked at startup, so the user-visible behaviour is right. The code says
+the opposite of what it does. Rename the flag to \code{password\_hidden} and it reads
+correctly.
+\end{honest}
+
+% =====================================================================
+\section{The remaining screens}
+
+\subsection{Attendance}
+\label{sec:attendance}
+
+\begin{honest}{Attendance has no table, and nothing it shows is real}
+\code{setup\_attendance\_table} contains this, and this is the entire data source:
+\begin{lstlisting}[language=Python]
+dummy_data = [
+    ("2025-03-01", "Monday", "Present"),
+    ("2025-03-02", "Tuesday", "Absent"),
+    ("2025-03-03", "Wednesday", "Present"),
+    ("2025-03-04", "Thursday", "Absent")
+]
+\end{lstlisting}
+Four hardcoded rows, four fixed dates in March 2025, no student id involved. There is no
+\code{Attendance} model and no attendance table in the schema; verified against
+\file{student.db}, which has exactly five tables and none of them is attendance.
+
+The consequence is that marking attendance does not persist. Reopen the screen and you are
+back to Present/Absent/Present/Absent regardless of what you set. The README states this
+in ``What I'd do differently'' and it is the right call to state it.
+
+What \emph{does} persist is the side effect: every press of Mark Attendance writes one
+\code{Activity} row per table row, unconditionally, whether or not the value changed. So
+four rows per press, forever. The shipped log's 116 rows include several of these. The
+docstring on \code{handle\_mark\_attendance} even says ``check if the user changed the
+status from the original dummy data'', and then does not: it re-sends and re-logs all four
+every time.
+\end{honest}
+
+The email handling here is the good part, and it is the mirror image of the verification
+fallback: \code{send\_attendance\_email} returns a boolean, \code{handle\_mark\_attendance}
+accumulates \code{all\_emails\_sent} across the rows, and the final dialog says either
+``Attendance marked and emails sent!'' or ``Attendance marked, but confirmation emails
+could not be sent'' with the env-var names in the message. That is an honest status, and
+it is the pattern \file{enroll.py} should have copied.
+
+\subsection{View schedule and the Excel export}
+
+Two modes on one table, switched by \code{self.filter\_mode}:
+
+\begin{itemize}
+  \item \textbf{Day} (the default): shows column 0, ``Current Day'', and includes only the
+        courses that meet today. The filter is
+        \code{if current\_day[:2] not in course\_days\_list: continue}, that is, take the
+        first two characters of \code{datetime.now().strftime("\%A")} (so ``Monday''
+        becomes ``Mo'') and look for it among the section's two-character day codes. This
+        is the same encoding as the clash detector, and it is why the codes must be exactly
+        two characters.
+  \item \textbf{Week}: hides column 0 and lists every enrolled course once.
+\end{itemize}
+
+\begin{honest}{Day mode is fragile in a way that only shows up on the wrong day}
+\code{current\_day[:2]} maps Monday to ``Mo'', Tuesday to ``Tu'', Wednesday to ``We'',
+Thursday to ``Th'', Friday to ``Fr'', Saturday to ``Sa'', Sunday to ``Su''. That works for
+this catalogue. It relies on the process locale producing English day names: on a machine
+with a non-English locale, \code{strftime("\%A")} returns a translated name and the day
+view silently shows nothing at all. No error, just an empty table. It also means the
+default view is empty on any day the student has no classes, which looks identical to a
+failure.
+\end{honest}
+
+The export is genuinely thoughtful:
+
+\begin{lstlisting}[language=Python,caption={\file{view\_schedule.py}: do not clobber an existing export.}]
+def save_data(self, excel_file_path, df):
+    while not is_file_found:
+        try:
+            pandas.read_excel(excel_file_path)      # if this succeeds, it exists
+            counter += 1
+            excel_file_path = ... + f'/{name} ({counter}).xlsx'
+        except FileNotFoundError:
+            df.to_excel(excel_file_path, index=False)
+            is_file_found = True
+\end{lstlisting}
+
+\begin{jargon}{pandas, DataFrame, openpyxl}
+\textbf{pandas} is the standard Python library for tabular data. Its central object is the
+\textbf{DataFrame}, a table with named columns. \code{DataFrame.to\_excel} writes it out as
+a real \file{.xlsx} spreadsheet, delegating the file format to \textbf{openpyxl}, which is
+why both are in \file{requirements.txt} even though no line of code imports openpyxl
+directly.
+\end{jargon}
+
+\begin{honest}{Detecting a file by trying to parse it}
+Probing with \code{read\_excel} and catching \code{FileNotFoundError} works, and the
+auto-increment to \code{schedule\_by\_week (1).xlsx} is a nice touch that the README is
+right to call out. But it reads and fully parses the whole spreadsheet just to learn
+whether it exists, when \code{os.path.exists(path)} answers the same question without
+opening anything. Worse, it only catches \code{FileNotFoundError}: if the existing file is
+corrupt, or locked because the user has it open in Excel, \code{read\_excel} raises
+something else, which is unhandled, and the export dies with a traceback in a terminal
+nobody is reading.
+\end{honest}
+
+\begin{honest}{Day-mode export is disabled, and the dead check gives away why}
+\code{export\_schedule} begins with \code{if self.filter\_mode == "Day":} and returns
+``Export Not Available''. Then, forty lines later, it asks \code{if self.filter\_mode ==
+"Day":} again, and that second block is unreachable. The README explains the history: the
+day view hides a column, the export was writing misaligned data, so it was disabled rather
+than shipped broken. That is the right decision. The residue is the dead second check and a
+\code{columns} list assigned in the first branch and never used.
+
+The consequence worth knowing for a demo: \code{filter\_mode} starts at \code{"Day"}, so
+\textbf{Export does nothing until you press Week first}. That looks like a broken button.
+\end{honest}
+
+\begin{honest}{The schedule window logs an activity in its constructor}
+\code{\_\_init\_\_} writes a \code{"Filter by Day"} activity row before the user has done
+anything, simply because the screen opened in day mode. So the log conflates ``opened the
+schedule'' with ``pressed the Day button''. Combined with the attendance screen's four
+rows per press, this is why the shipped log has 116 rows.
+\end{honest}
+
+\subsection{Activity log}
+
+The simplest screen: read every \code{Activity} row for the student, render six columns.
+It is the only place the log is consumed.
+
+\begin{honest}{A guard that hides data}
+\begin{lstlisting}[language=Python]
+if activity_log_data.course_id is not None and activity_log_data.course_section is not None:
+    self.activity_label_table_widget.setItem(row, 2, QTableWidgetItem(str(...course_id)))
+self.activity_label_table_widget.setItem(row, 3, QTableWidgetItem(...course_section))
+\end{lstlisting}
+Column 2 (Course ID) is populated only if \emph{both} the id and the section are non-null.
+So a log entry with a course id but no section shows a blank Course ID column, even though
+the id is right there in the row. Column 3 has no such guard and is set unconditionally,
+which for a null section passes \code{None} into \code{QTableWidgetItem}. There is no
+sorting and no pagination: 116 rows today, and it grows without limit because nothing ever
+prunes it.
+\end{honest}
+
+\subsection{The window-transition machinery}
+
+Every screen defines \code{closed = pyqtSignal()} and emits it from \code{closeEvent}. The
+hub connects that signal to its own \code{reopen\_login} (which just calls
+\code{self.show()}), and hides itself when opening a child. That is how closing a child
+brings the hub back.
+
+\begin{jargon}{Signals and slots}
+Qt's event mechanism. An object \textbf{emits} a \textbf{signal} (``I was closed'') without
+knowing or caring who is listening. Any number of functions, called \textbf{slots}, can be
+\code{connect}ed to it and are called when it fires. It is Qt's version of the observer
+pattern, and it is what decouples the child windows from the hub.
+\end{jargon}
+
+\begin{honest}{\code{closeEvent} never calls \code{super()}, and the hub calls it by hand}
+Every \code{closeEvent} override in the project has \code{\# super().closeEvent(event)}
+commented out and never accepts or ignores the event. Qt's default is to accept, so the
+windows do close, but the override is doing something other than what its signature
+promises.
+
+\code{MainStudentWindow.logout} is stranger still: it sets a flag and then calls
+\code{self.closeEvent(event=None)} \emph{directly}, invoking an event handler as an
+ordinary method with a fabricated null event. It works only because the body never touches
+\code{event}. The intended API is \code{self.close()}, which lets Qt deliver a real event.
+
+There is also a straightforward duplicate in \code{MainStudentWindow.activity\_log}:
+\begin{lstlisting}[language=Python]
+self.activity_log_window = ActivityLogWindow()
+self.activity_log_window = ActivityLogWindow(email=self.email)
+\end{lstlisting}
+Two windows are constructed; the first is immediately orphaned by the reassignment. It is
+never shown, but its constructor ran, which means it opened the \file{.ui} file, ran
+\code{get\_std\_id\_by\_email} for the \emph{default} student (Alice), and queried her
+activity log. A wasted window and a wasted round of queries on every click.
+\end{honest}
+
+\subsection{The name collision}
+
+\begin{honest}{Two different classes are both called \code{ViewScheduleWindow}}
+\file{enroll.py} defines \code{class ViewScheduleWindow(QMainWindow)}, which loads
+\file{enroll.ui} and is the \emph{checkout} screen. \file{view\_schedule.py} defines
+\code{class ViewScheduleWindow(QMainWindow)}, which loads \file{view\_schedule.ui} and is
+the \emph{schedule} screen. Same name, different files, different purposes.
+
+Nothing breaks, because \file{main\_window.py} imports the schedule one and
+\file{add\_courses.py} imports the enroll one, and no module imports both. It is a trap
+lying in wait for the first person who needs both in one file, and it makes the codebase
+hard to talk about. The history is visible: \file{enroll.py} is the older file (its class
+was clearly copied from the schedule screen and repurposed), and the \file{.ui} it loads is
+still named \code{view\_schedule\_window} internally, as is \file{add\_courses.ui}. Three
+files carry the fingerprint of one original. The README's final ``Challenges'' bullet
+already records this collision, which is the right instinct.
+\end{honest}
+
+\begin{honest}{An orphan interface file}
+\file{add\_remove\_interaction.ui} is 8.5 KB, the largest \file{.ui} in the project, and no
+Python file loads it. Verified by grep. It is a designed screen that was never wired up.
+\end{honest}
+
+% =====================================================================
+\section{Packaging and running}
+\label{sec:docker}
+
+\begin{jargon}{Docker, image, container}
+\textbf{Docker} packages an application together with its operating-system dependencies
+into an \textbf{image}, a frozen filesystem plus a start command. Running an image gives
+you a \textbf{container}, an isolated process that behaves the same on any machine with
+Docker. It is the standard answer to ``it works on my machine''.
+\end{jargon}
+
+The \file{Dockerfile} is short and its shape is right: start from \code{python:3.10-slim},
+install the system libraries Qt needs, set \code{WORKDIR /app} (which is what makes the
+relative \code{loadUi} paths resolve), install \file{requirements.txt} \emph{before}
+copying the code so that Docker's layer cache is not invalidated by every edit, copy
+everything including the seeded \file{student.db}, set \code{QT\_QPA\_PLATFORM=xcb}, and
+run \file{login\_page.py}.
+
+\begin{jargon}{X11 forwarding, and why a GUI in a container is awkward}
+A container has no screen. On Linux the display is managed by a server called \textbf{X11}
+which listens on a socket at \file{/tmp/.X11-unix}. The run scripts mount that socket into
+the container and pass the \code{DISPLAY} variable, so the containerised app draws on
+\emph{your} desktop. \code{xhost +local:docker} is the command that permits it, and it is a
+blunt instrument: it grants any local container access to your display for the session.
+\end{jargon}
+
+\begin{honest}{Docker can never send an email, by construction}
+Verified by grep: neither the \file{Dockerfile} nor any of the three run scripts mentions
+\code{ATTENDANCE\_SENDER\_EMAIL} or \code{ATTENDANCE\_SENDER\_PASSWORD}. No \code{ENV}, no
+\code{-e} flag, no \code{--env-file}. A container gets a fresh environment, so those
+variables are always empty inside it.
+
+The app therefore \emph{always} takes the fallback path in Docker: the verification code is
+printed to the container's terminal and attendance always reports that emails could not be
+sent. Because the fallback is honest, this degrades gracefully instead of breaking, which
+is a real vindication of the design. But the README's claim that the scripts ``forward the
+host display into the container'' is the whole story only for the display. If you demo from
+Docker, email is off, and adding
+\code{-e ATTENDANCE\_SENDER\_EMAIL -e ATTENDANCE\_SENDER\_PASSWORD} to the \code{docker
+run} lines is a one-line fix per script.
+\end{honest}
+
+\begin{honest}{The Dockerfile probably does not build any more. Labelled inferred.}
+The apt line installs \code{libgl1-mesa-glx}. The \code{python:3.10-slim} tag today is
+built on Debian 12 (bookworm), and \code{libgl1-mesa-glx} was \textbf{removed} in bookworm,
+replaced by \code{libgl1} and \code{libglx-mesa0}. If that is so, \code{apt-get install}
+exits non-zero and the image build fails at step 2.
+
+\textbf{This is inferred and was not verified.} The Docker daemon was not running on the
+machine this document was written on, so no build was attempted. Treat it as the first
+thing to check before demoing from Docker: run \code{docker build -t pscs-app .} and see.
+If it fails, change \code{libgl1-mesa-glx} to \code{libgl1} and it should proceed. Note
+this is a bit-rot issue, not a mistake: the line was almost certainly correct against the
+base image of the day.
+\end{honest}
+
+\begin{honest}{The run scripts contain characters that are not plain ASCII}
+All three (\file{run-linux.sh}, \file{run-macos.sh}, \file{run-windows.ps1}) contain a
+hammer emoji in their build message and a non-breaking hyphen (Unicode U+2011, not the
+ordinary U+002D) in the phrase ``Auto-build'' in their header comment. Both are in
+comments and echo strings, so they are harmless, but they are the fingerprint of text
+pasted from a rich-text editor. The non-breaking hyphen in particular is invisible in most
+editors and is the sort of thing that breaks a naive grep. (Those exact bytes are described
+here rather than reproduced, because this document is typeset with a font stack that has no
+glyph for either one.)
+
+\file{queries.py} and \file{verification.py} carry the same fingerprint: smart apostrophes
+inside docstrings, where an ASCII apostrophe was meant.
+\end{honest}
+
+\subsection{Dependencies, and what each is for}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{package} & \textbf{pinned} & \textbf{role} \\
+\midrule
+PyQt6 & \code{>=6.6,<7} & every window, widget, dialog and signal \\
+SQLAlchemy & \code{>=2.0,<3} & the ORM; models and every query \\
+pandas & \code{>=2.0} & builds the DataFrame for the Excel export \\
+openpyxl & \code{>=3.1} & the \file{.xlsx} writer pandas delegates to \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The upper bounds on the first two are correct practice: a major version bump of either is
+a breaking change. \code{pandas} and \code{openpyxl} have no upper bound, which is a minor
+inconsistency. The whole dependency set exists to serve one feature each, and there is
+nothing gratuitous in it.
+
+% =====================================================================
+\section{The verification story, and what it does not cover}
+
+\begin{honest}{The README describes a test methodology that no file in the repo implements}
+The README's Challenges and ``What I learned'' describe, in specific detail, a headless
+smoke test: setting \code{QT\_QPA\_PLATFORM=offscreen}, monkeypatching the static
+\code{QMessageBox} methods (\code{information}, \code{warning}, \code{critical}) so modals
+record their calls instead of blocking, and driving login through to the main window plus
+every sub-screen in one pass. It says ``This is how the project was last verified.''
+
+There is \textbf{no test file in the repository}. \code{git ls-files} lists no
+\file{tests/} directory, no \file{test\_*.py}, no pytest configuration, and no CI workflow.
+\file{.gitignore} mentions \code{.pytest\_cache/}, which is boilerplate.
+
+The most likely reading, and this is \textbf{inferred}, is that the smoke test was written
+as a throwaway script during a verification pass and never committed. That is a perfectly
+honest thing to have done, but the README's present tense reads as though the harness is
+part of the project, and an interviewer who goes looking for it will not find it. Two
+options, both fine: commit the script, or reword the README to say the test was run once,
+ad hoc, and not kept. The README's own last bullet already concedes ``Add tests. Everything
+here was verified by clicking through the app'', which sits oddly beside the detailed
+description of the harness. The two passages should be reconciled.
+\end{honest}
+
+\begin{keyidea}{What this document verified, and what remains open}
+\textbf{Verified by execution:} the capacity arithmetic and its overflow past
+\code{max\_capacity}; the swap's data loss; the foreign keys' invalidity under
+\code{PRAGMA foreign\_keys = ON}; \code{bool(Qt.CheckState.Unchecked) == True}; the
+\code{glob\_id} default of 20180; the ORM relationship warning. \textbf{Verified by
+inspection of \file{student.db}:} every row count, the day encodings, the over-capacity
+rows, the polluted \code{activity.course\_id} values, the all-NULL dead columns, the empty
+\code{filter} table. \textbf{Verified by grep:} \code{max\_capacity} unread,
+\file{courses\_database.py} unimported, \file{add\_remove\_interaction.ui} unloaded,
+\code{insert\_attendance\_activity} uncalled, the env vars unforwarded by Docker.
+
+\textbf{Open, and labelled inferred where claimed:} anything about on-screen behaviour
+(PyQt6 was not present, and the app needs a desktop); the Dockerfile's
+\code{libgl1-mesa-glx} problem; the verification window's dead end on a send failure; the
+history behind the missing test file.
+\end{keyidea}
+
+% =====================================================================
+\section{Findings, ranked}
+
+If you have five minutes before an interview, read only this.
+
+\begin{enumerate}
+  \item \textbf{The swap loses data} (\S\ref{sec:swap}). Delete commits, then insert is
+        attempted; a failure between them destroys the enrollment and the UI says nothing
+        happened. Verified by running it. Fix: one transaction around both.
+  \item \textbf{The foreign keys are structurally invalid and never enforced}
+        (\S\ref{sec:fkbroken}). They reference one column of a composite primary key.
+        SQLite's default of not checking is the only reason the app works. Verified.
+  \item \textbf{\code{max\_capacity} is never read} (\S\ref{sec:capacity}), and the shipped
+        database already has two sections at 51 seats against a maximum of 50. Verified.
+  \item \textbf{Passwords are plaintext} and compared with \code{==}. Already documented in
+        the README, which is the right way to carry it.
+  \item \textbf{The clash rule rejects back-to-back classes} (\S\ref{sec:clash}) because
+        all three interval tests use \code{<=} on the boundary.
+  \item \textbf{Attendance is four hardcoded rows} with no table behind them
+        (\S\ref{sec:attendance}), and it writes four log rows per press regardless of
+        change.
+  \item \textbf{The README is wrong in three places}: \file{courses\_database.py} is not a
+        seeding helper (it is a dead, incompatible \code{Student} model); \code{glob\_id}
+        is per-instance so the stated call-order hazard does not exist as described (the
+        shared \emph{session} is the real one); and the described headless test harness is
+        not in the repository.
+  \item \textbf{Dead weight:} the \code{filter} table (0 rows, no code), the \code{swap\_id}
+        and \code{remove\_id} columns (all NULL), \file{courses\_database.py},
+        \file{add\_remove\_interaction.ui}, \code{insert\_attendance\_activity}, the
+        double-construction in \code{activity\_log()}, and the unreachable second day check
+        in \code{export\_schedule}.
+  \item \textbf{\code{python queries.py} wipes the \code{activity} and \code{course}
+        tables} with no confirmation.
+  \item \textbf{Cosmetic but demo-visible:} the drop screen's headers are off by one from
+        column 6; Export appears broken until Week is pressed; ``Test Course'' at 02:30 on
+        MoSa is in the catalogue.
+\end{enumerate}
+
+\begin{keyidea}{And what is genuinely good, which is worth saying too}
+The \code{AllQueries} choke point is a real architectural decision that paid off, and the
+README's account of why (a two-person team needed one contract between screens) is
+credible and supported by the code. The cart/enroll split is the right model. The
+environment-gated email with a \emph{truthful} fallback in both paths is better engineering
+than most coursework contains, and it is the reason the app still runs for anyone who
+clones it. The Excel auto-increment shows someone thought about the second time the button
+is pressed. And disabling the day export rather than shipping a misaligned spreadsheet was
+the right call, made for the right reason.
+
+Above all: the README already names most of the weaknesses in this document, in public, on
+a portfolio piece. That is the hardest thing on this list to do, and it is the thing to
+lead with.
+\end{keyidea}
+
+\end{document}
